@@ -12,6 +12,7 @@ Design spec and reference implementation for a daisy-chained network topology
 | `grouping.py` | Reference implementation of the grouping algorithm. |
 | `test_grouping.py` | Scenario suite — 84 assertions across 10 categories (A–J). |
 | `grouping-test-scenarios.md` | Human-readable scenario matrix with expected outcomes. |
+| `IMPLEMENTATION-SPEC.md` | Self-contained spec for implementing the algorithm from scratch (agent-ready): model, math, phases, priority stack, open forks, ground-truth verification cases. |
 
 ## Running the tests
 
