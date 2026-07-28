@@ -7,12 +7,10 @@ Design spec and reference implementation for a daisy-chained network topology
 
 | File | Purpose |
 |------|---------|
-| `network-topology-reference.md` | The spec: topology rules, data/redundancy model, priority stack, grouping algorithm (census → virtual chain → flexible k, with donor/dissolve fallback), worked examples, edge-case test checklist, mirror-mode extension notes. |
+| **`SPEC.md`** | The complete specification in one file: topology rules, data/redundancy model, priority stack, grouping algorithm (census → virtual chain → flexible k, with donor/dissolve fallback), worked examples, agent-ready implementation spec with ground-truth cases, full test scenario matrix, edge-case checklist, and mirror-mode extension notes. |
 | `phase1-column-pooling-flow.svg` / `phase2-fragment-completion-flow.svg` | Decision-flow diagrams embedded by the spec. |
 | `grouping.py` | Reference implementation of the grouping algorithm. |
 | `test_grouping.py` | Scenario suite — 84 assertions across 10 categories (A–J). |
-| `grouping-test-scenarios.md` | Human-readable scenario matrix with expected outcomes. |
-| `IMPLEMENTATION-SPEC.md` | Self-contained spec for implementing the algorithm from scratch (agent-ready): model, math, phases, priority stack, open forks, ground-truth verification cases. |
 
 ## Running the tests
 
@@ -31,5 +29,5 @@ No dependencies beyond the Python 3 standard library.
   survives a root (RCD) outage; `allowDissolve` controls what happens when a
   fragment cannot be completed.
 
-Open design decisions are marked inline in the spec (pool immutability, CLD
+Open design decisions are marked inline in `SPEC.md` (pool immutability, CLD
 daisy-chain positions, seam-size trade, multi-deficient pairing order).
