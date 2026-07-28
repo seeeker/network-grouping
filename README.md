@@ -10,13 +10,13 @@ Design spec and reference implementation for a daisy-chained network topology
 | **`SPEC.md`** | The complete specification in one file: topology rules, data/redundancy model, priority stack, grouping algorithm (census → virtual chain → flexible k, with donor/dissolve fallback), worked examples, agent-ready implementation spec with ground-truth cases, full test scenario matrix, edge-case checklist, and mirror-mode extension notes. |
 | `phase1-column-pooling-flow.svg` / `phase2-fragment-completion-flow.svg` | Decision-flow diagrams embedded by the spec. |
 | `grouping.py` | Reference implementation of the grouping algorithm. |
-| `test_grouping.py` | Scenario suite — 84 assertions across 10 categories (A–J). |
+| `test_grouping.py` | Scenario suite — 96 assertions across 11 categories (A–K, incl. shard assignment). |
 
 ## Running the tests
 
 ```bash
 python3 test_grouping.py
-# PASS: 84 / FAIL: 0
+# PASS: 96 / FAIL: 0
 ```
 
 No dependencies beyond the Python 3 standard library.

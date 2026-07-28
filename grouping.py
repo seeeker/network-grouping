@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 class Result:
     pools: list = field(default_factory=list)      # list of lists of client ids
     defects: list = field(default_factory=list)    # list of lists (stranded sets)
+    shards: dict = field(default_factory=dict)     # client id -> shard number 1..T
     notes: list = field(default_factory=list)      # human-readable trace
     feasibility: dict = field(default_factory=dict)
 
@@ -46,10 +47,11 @@ def nearest_feasible_totals(n, t, m):
 
 
 class _Client:
-    __slots__ = ("cid", "col", "pos", "junction")
+    __slots__ = ("cid", "col", "pos", "junction", "chd")
 
-    def __init__(self, cid, col, pos, junction):
+    def __init__(self, cid, col, pos, junction, chd):
         self.cid, self.col, self.pos, self.junction = cid, col, pos, junction
+        self.chd = chd
 
 
 def _tree_distance(a, b):
@@ -65,17 +67,23 @@ def _frag_distance(frag, client):
     return min(_tree_distance(m, client) for m in frag)
 
 
-def group_clients(columns, T, M, allow_dissolve=False):
+def group_clients(columns, T, M, allow_dissolve=False, chd_shard_diversity=False):
     res = Result()
     # ---- Phase 0: annotate + census -------------------------------------
     clients = {}
     cols = {}
     for col_id, spec in columns.items():
         members = []
-        for i, cid in enumerate(spec["clients"]):
-            c = _Client(cid, col_id, i, spec["junction"])
-            clients[cid] = c
-            members.append(c)
+        raw = spec["clients"]
+        # nested = list of CHD groups (head->tail); flat = each client its own CHD
+        chd_groups = raw if raw and isinstance(raw[0], (list, tuple)) else [[x] for x in raw]
+        i = 0
+        for chd_idx, group in enumerate(chd_groups):
+            for cid in group:
+                c = _Client(cid, col_id, i, spec["junction"], f"{col_id}/chd{chd_idx}")
+                clients[cid] = c
+                members.append(c)
+                i += 1
         if members:
             cols[col_id] = members
 
@@ -211,8 +219,44 @@ def group_clients(columns, T, M, allow_dissolve=False):
             res.notes.append(f"defect: {_ids(F)} stranded "
                              f"(allowDissolve=false)")
 
+    # ---- Phase 4: shard assignment ----
+    res.shards = _assign_shards(pools, T, chd_shard_diversity)
     res.pools = [_ids(p) for p in pools]
     return res
+
+
+def _assign_shards(pools, T, diversity):
+    """Assign each pool member a shard in 1..T; every pool covers {1..T}.
+
+    Extras (pool size > T) duplicate shards round-robin from shard 1.
+    diversity=True: greedily maximize distinct shards per CHD (cross-pool:
+    a CHD straddling two pools still avoids repeats where possible).
+    diversity=False: plain sorted-order assignment (no CHD constraint).
+    """
+    from collections import Counter
+    assignment = {}
+    chd_used = {}                                   # chd -> set of shards present
+    for P in pools:
+        n = len(P)
+        multiset = Counter(range(1, T + 1))
+        for i in range(n - T):                      # duplicates, round-robin
+            multiset[(i % T) + 1] += 1
+        if diversity:
+            for c in P:                             # chain order
+                used = chd_used.setdefault(c.chd, set())
+                fresh = [s for s in sorted(multiset) if multiset[s] > 0
+                         and s not in used]
+                pool_left = [s for s in sorted(multiset) if multiset[s] > 0]
+                s = fresh[0] if fresh else pool_left[0]
+                assignment[c.cid] = s
+                multiset[s] -= 1
+                used.add(s)
+        else:
+            flat = sorted(multiset.elements())
+            for c, s in zip(P, flat):
+                assignment[c.cid] = s
+                chd_used.setdefault(c.chd, set()).add(s)
+    return assignment
 
 
 def _ids(client_list):

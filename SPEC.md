@@ -1,7 +1,7 @@
 # Network topology & client-pool grouping — complete specification
 
 Single-file spec. Companion code in this repository: `grouping.py` (reference
-implementation) and `test_grouping.py` (84-assertion suite). Diagrams referenced
+implementation) and `test_grouping.py` (96-assertion suite). Diagrams referenced
 below live alongside this file as SVGs.
 
 **Contents**
@@ -93,6 +93,40 @@ Applied in strict order:
 3. **Minimize cross-chain span.** Proximity (network locality) is optimized only after 1 and 2 are satisfied, to avoid unnecessary daisy-chain traffic.
 
 > **Scope note.** This stack assumes a **single tree**: one RCD, single ADDs, no mirror/failover paths present. In this scope, **RCD/root outage is survivable** (local pools serve data) and **client loss is survivable** (via over-provisioning), but **ADD failure and RCD-as-network-path failure are NOT survivable** — those require the mirror-mode topologies (see the extension at the end). Do not rely on any ADD or the RCD network path staying up.
+
+## Data set sharding and shard assignment
+
+The pool-size terms above have a concrete data meaning:
+
+- The data set is **split into exactly `T` parts** ("shards", numbered 1…T). That is
+  *why* `T` is the minimum complete pool size: one member per shard.
+- When a group is formed, **each member is assigned one shard number** and holds that
+  partial data set.
+- **Invariant:** every pool must cover **all `T` shards** — a full data set must exist
+  within the pool. Pools larger than `T` carry **duplicate** shards; the duplicates are
+  where client-loss tolerance physically lives (losing a member whose shard is
+  duplicated costs nothing; losing a uniquely-held shard makes the pool incomplete).
+  Duplicates are spread round-robin from shard 1 so no shard is over-duplicated.
+
+### CHD shard diversity (`chdShardDiversity` flag)
+
+User-controlled flag governing how shard numbers are placed onto the clients of each
+**chain device (CHD)**:
+
+| `chdShardDiversity` | Behavior | Intent |
+|---|---|---|
+| `true` | Clients on the same CHD are assigned shards **as diverse as possible** (greedy: never repeat a shard on a CHD while an unused one remains in the pool's multiset). | Multicast-friendly: every shard stream traveling the chain finds a recipient at nearly every CHD. |
+| `false` (default) | No CHD constraint; plain in-order assignment. | Leaves room for the opposite strategy (clustering same shards per CHD to prune per-stream multicast trees) if later specified. |
+
+**Diversity is a cross-pool property.** Pools are contiguous runs, so a CHD's clients
+usually share a pool — but a CHD at a pool boundary can straddle two pools, and the
+diversity goal still applies across them: those clients should hold different shard
+numbers where possible. Shard assignment therefore runs *after* all pools are formed
+(Phase 4), tracking used-shards **per CHD globally**, not per pool.
+
+**Input consequence:** the topology input must carry CHD grouping (which clients sit
+on which CHD), not just flat column order. Flat input remains legal (each client
+treated as its own CHD, making the flag a no-op).
 
 ### Grouping rules (as specified)
 
@@ -248,6 +282,22 @@ for c in unassigned_surplus(clients):
     if p exists:
         move c into p                                # raises client-loss tolerance
     # else: leave as spare (or FLAG if it is stranded below T on its own)
+
+# ---- Phase 4: shard assignment ----
+# Runs after ALL pools are final. chd_used is GLOBAL (cross-pool), so a CHD
+# straddling two pools still avoids shard repeats under diversity.
+chd_used = {}                                        # chd -> set of shards present
+for P in groups (members in chain order):
+    multiset = {1..T} + round-robin duplicates for the (|P| - T) extras
+    if chdShardDiversity:
+        for c in P:
+            s = lowest shard in multiset NOT in chd_used[c.chd]   # fresh if possible
+                else lowest shard remaining in multiset           # forced repeat
+            assign c -> s; remove s from multiset; chd_used[c.chd] += s
+    else:
+        assign sorted(multiset) to P in order       # no CHD constraint
+# Postcondition: every pool's assigned shards cover {1..T}. Defect clients
+# receive NO shard (they are not in a pool).
 
 OUTPUT:
   groups            # each a complete pool, size in [T, M]
@@ -413,7 +463,7 @@ Same sizes, same completeness — dramatically less span. Only client 15 crosses
 ## Edge cases for testing (implementation checklist)
 
 Full scenario matrix with expected outcomes lives in Part IV;
-a reference implementation and passing suite (84 assertions) in `grouping.py` /
+a reference implementation and passing suite (96 assertions) in `grouping.py` /
 `test_grouping.py`. This checklist is the condensed index for a production test plan.
 
 ### Covered by the current suite (categories A–J)
@@ -451,6 +501,13 @@ a reference implementation and passing suite (84 assertions) in `grouping.py` /
 25. **`allowDissolve` × immutability interaction** — dissolve requires growing formed pools; under immutability it must run pre-finalization as a re-chunk. Test both orderings once decided.
 26. **Fragility placement** — biasing the at-`T` (zero-loss-tolerance) pool toward the least risky location when client reliability varies; blocked on reliability data existing.
 
+### Shard assignment (Phase 4)
+
+28. **Shard coverage invariant** — every pool covers shards {1..T} under both flag settings; duplicates round-robin; defect clients unsharded. *(covered: suite category K)*
+29. **CHD diversity on/off** — diversity=true yields max distinct shards per CHD, including **cross-pool** on straddling CHDs; diversity=false unconstrained. *(covered: category K)*
+30. **Diversity=false semantics** — unconstrained today; active same-shard clustering per CHD is a possible third mode. *(pending decision — see Part III §9.5)*
+31. **Flat vs nested input** — flat client lists remain legal (each client its own CHD; diversity a no-op). *(covered: category K)*
+
 ### Out of scope (by design)
 
 27. **Mirror mode** — fault-domain spreading, populated-vs-bare failover, dual-path tagging. Test plan belongs to the mirror-mode extension when that hardware is in scope.
@@ -462,7 +519,7 @@ a reference implementation and passing suite (84 assertions) in `grouping.py` /
 **Audience:** an implementer (human or agent) building this from scratch. This file is
 self-contained: everything needed to implement and verify the algorithm is here.
 Context files (optional): Parts I–II of this document,
-`grouping.py` (reference implementation), `test_grouping.py` (84-assertion suite),
+`grouping.py` (reference implementation), `test_grouping.py` (96-assertion suite),
 Part IV (scenario matrix).
 
 ---
@@ -497,11 +554,17 @@ Junction := the attachment point of a column: an ADD id, or the literal
 **Input schema** (any equivalent structure is fine):
 
 ```
-columns: map<column_id, { junction: string, clients: [client_id, ...] }>
-         # client list is head → tail order; may be empty
-T:       int   # Target Pool Size — minimum clients that reconstruct the data set
+columns: map<column_id, { junction: string,
+                          clients: [[client_id, ...], ...]   # nested: one inner
+                        }>                                   # list per CHD,
+         # CHDs and clients in head → tail order; may be empty.
+         # A flat list [client_id, ...] is also legal (each client is then
+         # treated as its own CHD, making chdShardDiversity a no-op).
+T:       int   # Target Pool Size — the data set is split into exactly T shards;
+               # T is therefore the minimum clients that reconstruct it
 M:       int   # Max Pool Size — hard cap (per client type; see §9.1)
-allowDissolve: bool  # user flag, default false — see §6
+allowDissolve:     bool  # user flag, default false — see §6
+chdShardDiversity: bool  # user flag, default false — see §6.4
 ```
 
 **Output schema:**
@@ -509,12 +572,15 @@ allowDissolve: bool  # user flag, default false — see §6
 ```
 pools:   [[client_id, ...], ...]   # every pool has T <= size <= M
 defects: [[client_id, ...], ...]   # stranded clients, grouped as stranded
+shards:  map<client_id, int 1..T>  # shard assignment; defect clients absent
 report:  feasibility info + trace  # see §7
 ```
 
 **Postconditions to assert:** (a) every input client appears in exactly one pool or
 one defect set; (b) every pool size is in `[T, M]`; (c) defects are empty iff the
-total is partitionable AND no column was isolated beyond repair.
+total is partitionable AND no column was isolated beyond repair; (d) every pool's
+assigned shards cover the full set {1..T}; (e) exactly the pooled clients appear
+in `shards`.
 
 ### 3. Core math
 
@@ -693,6 +759,33 @@ requires a re-run to undo. The user opts *into* the lossier action.
 A defect is not a resting state — it is a region that cannot survive an RCD outage.
 Always emit it in the report with the feasibility remedy (§7).
 
+### 6.4 Phase 4 — shard assignment
+
+The data set is split into exactly `T` shards (1..T); each pool member holds one.
+Runs strictly after all pools are final (dissolve included), because diversity is a
+**cross-pool, per-CHD** property.
+
+```
+chd_used = {}                              # chd -> shards already present (GLOBAL)
+for each pool P, members in chain order:
+    multiset = {1..T}
+    for i in 0 .. |P|-T-1: multiset += (i mod T) + 1     # duplicates round-robin
+    if chdShardDiversity:
+        for c in P:
+            fresh = lowest s in multiset with s not in chd_used[c.chd]
+            s = fresh if it exists else lowest s remaining in multiset
+            assign, remove from multiset, record in chd_used[c.chd]
+    else:
+        assign sorted(multiset) to members in order
+```
+
+Invariants: every pool covers {1..T} (the multiset construction guarantees it
+regardless of the flag); defect clients get no shard. Under diversity, a repeat on
+a CHD occurs only when forced (more co-located members than distinct shards
+remaining). `chdShardDiversity = false` currently means *unconstrained*; an active
+clustering mode (same shard grouped per CHD, to prune per-stream multicast trees)
+is a possible third setting — see §9.6.
+
 ### 7. Reporting
 
 Compute up front and attach to output:
@@ -750,7 +843,13 @@ junction, greedy order can strand clients that a different pairing would save
 Default: greedy; production should exhaustively try pairings when deficient
 count at a junction exceeds 2 (the search space is tiny).
 
-#### 9.5 CLD daisy-chains
+#### 9.5 Diversity=false semantics
+`chdShardDiversity = false` is currently *unconstrained* assignment. If the
+motivation for turning diversity off is active same-shard clustering per CHD
+(pruning multicast trees per stream), that is a third mode, not the current false.
+Default: unconstrained; consider an enum {diverse, unconstrained, clustered}.
+
+### 9.6 CLD daisy-chains
 Clients may chain off clients (CLD → CLD). Their `pos` in the proximity metric is
 undefined. Proposed default: a chained client sits at `parent.pos` + chain depth.
 Decide before topologies with client chains go live.
@@ -780,14 +879,19 @@ reference suite asserts; an implementation disagreeing with any of them is wrong
 | 15 | a single lone client | 5 | either | defect [that client] (dissolve needs an existing pool with headroom; none exists) |
 | 16 | empty topology | 5 | — | no pools, no defects |
 
+| 17 | any pooled case above, either flag | — | — | every pool's shards cover {1..T}; defect clients unsharded |
+| 18 | one column, CHDs [1,2,3],[4,5,6], T=3, diversity=true | 3 | — | each CHD holds 3 distinct shards |
+| 19 | same, diversity=false | 3 | — | at least one CHD repeats a shard (pool of 6 at T=3 duplicates every shard) |
+| 20 | column of 10 @ T=5 with a CHD straddling the [1–5]/[6–10] pool boundary, diversity=true | 5 | — | the straddling CHD's two clients hold different shards (cross-pool diversity) |
+
 Also assert globally, on every case: coverage (each client in exactly one pool or
-defect), size bounds, and — for feasible totals with same-junction columns — zero
-defects.
+defect), size bounds, shard coverage per pool, and — for feasible totals with
+same-junction columns — zero defects.
 
 ### 11. Reference-implementation pointers
 
 `grouping.py` in this repository implements everything above (~200 lines, stdlib
-only); `test_grouping.py` runs 84 assertions over the cases in §10 plus invariant
+only); `test_grouping.py` runs 96 assertions over the cases in §10 plus invariant
 checks. Use them as an oracle: run both implementations on random topologies and
 diff outputs. Divergences are acceptable only where §9 marks a fork — and then only
 after the fork is decided and pinned.
@@ -798,7 +902,7 @@ after the fork is decided and pinned.
 
 Companion to Parts I–III of this document. Every scenario below is implemented and
 passing in `test_grouping.py` against the reference implementation `grouping.py`
-(84 assertions, 0 failures). Parameters are `T` = Target Pool Size, `M` = 6 unless noted.
+(96 assertions, 0 failures). Parameters are `T` = Target Pool Size, `M` = 6 unless noted.
 
 ### A. Single-column basics
 

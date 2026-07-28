@@ -11,6 +11,8 @@ Categories:
   H. Deficient columns under DIFFERENT junctions (no virtual chain)
   I. Direct-off-RCD junction merges
   J. Degenerate inputs (empty column, single isolated client, tiny topology)
+  K. Shard assignment (Phase 4): coverage invariant, CHD diversity on/off,
+     cross-pool diversity on straddling CHDs, duplicate distribution
 """
 
 from grouping import group_clients, feasible_ks, nearest_feasible_totals
@@ -151,6 +153,73 @@ def run():
 
     r = group_clients({}, T=5, M=6)
     check("J4 empty topology", r.pools == [] and r.defects == [])
+
+    # ---------- K. shard assignment ----------
+    def pool_shards(res, pool):
+        return [res.shards[c] for c in pool]
+
+    def chd_map(columns):
+        m = {}
+        for col_id, spec in columns.items():
+            raw = spec["clients"]
+            groups = raw if raw and isinstance(raw[0], (list, tuple)) else [[x] for x in raw]
+            for gi, g in enumerate(groups):
+                for cid in g:
+                    m[cid] = f"{col_id}/chd{gi}"
+        return m
+
+    # K1/K2: every pool covers all shards 1..T, both modes
+    cols_k = {"c1": col("ADD1", [[1, 2, 3], [4, 5, 6], [7, 8], [9, 10]])}
+    for div in (False, True):
+        r = group_clients(cols_k, T=5, M=6, chd_shard_diversity=div)
+        for p in r.pools:
+            check(f"K1 coverage div={div}", set(pool_shards(r, p)) == set(range(1, 6)),
+                  f"pool {p} shards {pool_shards(r, p)}")
+
+    # K3: duplicates distributed round-robin (pool of 6 at T=5 -> shard 1 twice)
+    r = group_clients({"c1": col("ADD1", range(1, 7))}, T=5, M=6)
+    counts = sorted(__import__("collections").Counter(r.shards.values()).values())
+    check("K3 duplicate spread", counts == [1, 1, 1, 1, 2], r.shards)
+
+    # K4: diversity ON -> a CHD gets max distinct shards. T=3, pool of 6,
+    # two CHDs of 3: each CHD should hold {1,2,3}.
+    cols_k4 = {"c1": {"junction": "ADD1", "clients": [[1, 2, 3], [4, 5, 6]]}}
+    r = group_clients(cols_k4, T=3, M=6, chd_shard_diversity=True)
+    cm = chd_map(cols_k4)
+    per_chd = {}
+    for cid, s in r.shards.items():
+        per_chd.setdefault(cm[cid], []).append(s)
+    for chd, sh in per_chd.items():
+        check("K4 diverse CHD", len(set(sh)) == 3, f"{chd}: {sh}")
+
+    # K5: diversity OFF on same setup -> at least one CHD repeats a shard
+    r = group_clients(cols_k4, T=3, M=6, chd_shard_diversity=False)
+    per_chd = {}
+    for cid, s in r.shards.items():
+        per_chd.setdefault(cm[cid], []).append(s)
+    check("K5 non-diverse repeats", any(len(set(sh)) < len(sh) for sh in per_chd.values()),
+          per_chd)
+
+    # K6: cross-pool diversity on a straddling CHD. Column of 10 @ T=5 ->
+    # pools [1-5],[6-10]; CHD layout [1,2,3,4],[5,6],[7,8,9,10] puts 5 (pool A)
+    # and 6 (pool B) on one CHD; diversity should give them different shards.
+    cols_k6 = {"c1": {"junction": "ADD1",
+                      "clients": [[1, 2, 3, 4], [5, 6], [7, 8, 9, 10]]}}
+    r = group_clients(cols_k6, T=5, M=6, chd_shard_diversity=True)
+    check("K6 straddle distinct", r.shards[5] != r.shards[6],
+          f"5->{r.shards[5]}, 6->{r.shards[6]}")
+
+    # K7: flat input (no CHD info) is legal; coverage still holds
+    r = group_clients({"c1": col("ADD1", range(1, 11))}, T=4, M=6,
+                      chd_shard_diversity=True)
+    for p in r.pools:
+        check("K7 flat coverage", set(pool_shards(r, p)) == set(range(1, 5)),
+              pool_shards(r, p))
+
+    # K8: defect clients get no shard assignment
+    r = group_clients({"c1": col("ADD1", [1, 2, 3])}, T=5, M=6)
+    check("K8 defects unsharded", r.shards == {} and r.defects == [[1, 2, 3]],
+          (r.shards, r.defects))
 
     print(f"PASS: {PASS}")
     if FAIL:
