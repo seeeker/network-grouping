@@ -135,7 +135,7 @@ treated as its own CHD, making the flag a no-op).
 - **Leftover clients** (after dividing a column into `T`-sized groups) are **distributed evenly across that column's groups**, growing them toward `M`. Leftovers top groups *up*; they never form a sub-`T` group.
 - Groups are **contiguous runs** along the chain, so "even distribution" never scatters one pool across the daisy chain.
 - A column with **fewer than `T`** clients cannot self-complete and **must merge outward** — this is mandatory, not optional.
-- **Partner selection when merging:** **proximity is primary** (nearest clients first); **incomplete-vs-surplus is the tiebreaker** (at equal distance, prefer combining two incomplete fragments over drawing from a surplus column, which keeps surplus columns' core pools local and resolves two deficits at once).
+- **Partner selection when merging:** **proximity is primary** (nearest clients first); **incomplete-vs-surplus is the tiebreaker** (at equal distance, prefer combining two incomplete fragments over drawing from a surplus column, which keeps surplus columns' core pools local and resolves two deficits at once). *(Same-junction merges are resolved structurally in Phase 1 via virtual chains; this rule governs the Phase 2 fallback.)*
 - Any fragment that **cannot reach `T`** even after exhausting all reachable clients is a **hard availability defect** — flag it (topological fix: add clients, or accept documented RCD-dependence). Never silently leave a group below `T`.
 
 ---
@@ -340,6 +340,12 @@ A column with no deficient neighbor is simply a virtual chain of one column, so 
 
 ### Worked example: cross-column donation (`T = 4`, `M = 6`)
 
+> **Historical note.** Under the current census → virtual-chain design, this case
+> resolves in **Phase 1** as a virtual chain (see the C2 divergence note in
+> Part IV), producing a different but equally valid grouping. The donor walk below
+> remains the canonical illustration of the **Phase 2 fallback** mechanics, which
+> still govern non-mergeable cases (different junctions, unpartitionable merges).
+
 Setup — two columns under the same ADD, clients numbered head-of-chain → end:
 
 - **Column 1:** clients 1–10
@@ -466,7 +472,7 @@ Full scenario matrix with expected outcomes lives in Part IV;
 a reference implementation and passing suite (96 assertions) in `grouping.py` /
 `test_grouping.py`. This checklist is the condensed index for a production test plan.
 
-### Covered by the current suite (categories A–J)
+### Covered by the current suite (categories A–K)
 
 1. **Even split** — column divides exactly into `T`-sized groups (8 @ T=4 → [4,4]).
 2. **Leftover top-up** — remainder distributed upward, never a sub-`T` group (10 @ T=4 → [5,5]).
@@ -503,14 +509,14 @@ a reference implementation and passing suite (96 assertions) in `grouping.py` /
 
 ### Shard assignment (Phase 4)
 
-28. **Shard coverage invariant** — every pool covers shards {1..T} under both flag settings; duplicates round-robin; defect clients unsharded. *(covered: suite category K)*
-29. **CHD diversity on/off** — diversity=true yields max distinct shards per CHD, including **cross-pool** on straddling CHDs; diversity=false unconstrained. *(covered: category K)*
-30. **Diversity=false semantics** — unconstrained today; active same-shard clustering per CHD is a possible third mode. *(pending decision — see Part III §9.5)*
-31. **Flat vs nested input** — flat client lists remain legal (each client its own CHD; diversity a no-op). *(covered: category K)*
+27. **Shard coverage invariant** — every pool covers shards {1..T} under both flag settings; duplicates round-robin; defect clients unsharded. *(covered: suite category K)*
+28. **CHD diversity on/off** — diversity=true yields max distinct shards per CHD, including **cross-pool** on straddling CHDs; diversity=false unconstrained. *(covered: category K)*
+29. **Diversity=false semantics** — unconstrained today; active same-shard clustering per CHD is a possible third mode. *(pending decision — see Part III §10.5)*
+30. **Flat vs nested input** — flat client lists remain legal (each client its own CHD; diversity a no-op). *(covered: category K)*
 
 ### Out of scope (by design)
 
-27. **Mirror mode** — fault-domain spreading, populated-vs-bare failover, dual-path tagging. Test plan belongs to the mirror-mode extension when that hardware is in scope.
+31. **Mirror mode** — fault-domain spreading, populated-vs-bare failover, dual-path tagging. Test plan belongs to the mirror-mode extension when that hardware is in scope.
 
 ---
 
@@ -527,8 +533,9 @@ Part IV (scenario matrix).
 ### 1. Problem statement
 
 A tree-shaped network distributes a data set held in full by a **root controller
-device (RCD)**. Clients (**CLD**) cannot hold the full set individually, but a group
-("pool") of them can, each member holding a shard. Clients read from their pool first;
+device (RCD)**. The data set is split into exactly **T shards** (1..T). Clients
+(**CLD**) cannot hold the full set individually, but a group ("pool") of them can,
+each member holding one shard (assignment: §7). Clients read from their pool first;
 the RCD is a fallback that must be assumed able to fail. Therefore:
 
 > **Invariant I1:** every client must belong to a pool large enough to reconstruct the
@@ -562,9 +569,9 @@ columns: map<column_id, { junction: string,
          # treated as its own CHD, making chdShardDiversity a no-op).
 T:       int   # Target Pool Size — the data set is split into exactly T shards;
                # T is therefore the minimum clients that reconstruct it
-M:       int   # Max Pool Size — hard cap (per client type; see §9.1)
+M:       int   # Max Pool Size — hard cap (per client type; see §10.1)
 allowDissolve:     bool  # user flag, default false — see §6
-chdShardDiversity: bool  # user flag, default false — see §6.4
+chdShardDiversity: bool  # user flag, default false — see §7
 ```
 
 **Output schema:**
@@ -573,7 +580,7 @@ chdShardDiversity: bool  # user flag, default false — see §6.4
 pools:   [[client_id, ...], ...]   # every pool has T <= size <= M
 defects: [[client_id, ...], ...]   # stranded clients, grouped as stranded
 shards:  map<client_id, int 1..T>  # shard assignment; defect clients absent
-report:  feasibility info + trace  # see §7
+report:  feasibility info + trace  # see §8
 ```
 
 **Postconditions to assert:** (a) every input client appears in exactly one pool or
@@ -596,7 +603,7 @@ partitionable(n)     = feasible_ks(n, T, M) is non-empty     (n >= T required)
 
 Example (T=5, M=6): reachable totals are 5, 6, 10, 11, 12, 15, 16, 17, 18, 20, …
 — **13, 14, 19 are gaps.** If the grand total of clients sits in a gap, at least one
-client is stranded *no matter what the algorithm does*. Detect this up front (§7).
+client is stranded *no matter what the algorithm does*. Detect this up front (§8).
 
 #### 3.2 Splitting sizes
 
@@ -606,11 +613,11 @@ by construction when `k` is feasible.
 
 **Choosing k when several are feasible:** pick the **smallest** k (fewest, largest
 pools). Rationale: a pool above `T` tolerates client loss (size can drop to `T` and
-stay complete); this is the only redundancy lever in scope (priority stack, §8).
+stay complete); this is the only redundancy lever in scope (priority stack, §9).
 
 **Ordering the sizes:** when the unit is a merged virtual chain (§5), put the
 **larger** sizes at the seam end (start of the linearization) so the cross-junction
-pool carries slack. This is a deliberate, documented trade — see §9.2 before locking it.
+pool carries slack. This is a deliberate, documented trade — see §10.2 before locking it.
 
 #### 3.3 Tree distance (proximity metric)
 
@@ -627,21 +634,23 @@ precision. Distance from a *set* (fragment/pool) to a client = min over members.
 
 ### 4. Algorithm overview
 
-Three phases. Phase 1 does the heavy lifting; Phase 2 is a fallback; Phase 3 is
-cosmetic.
+Four phases. Phase 1 does the heavy lifting; Phase 2 is a fallback; Phase 3 is
+cosmetic; Phase 4 assigns data to the finished pools.
 
 ```
-Phase 0  Annotate clients (column, pos, junction) + deficiency census
+Phase 0  Annotate clients (column, pos, junction, CHD) + deficiency census
          + grand-total feasibility check.
 Phase 1  Build units (virtual chains), cut each with flexible k.
 Phase 2  FALLBACK: complete leftover fragments via donors; then the
          user-controlled dissolve; else flag defects.
 Phase 3  Optional: distribute any remaining spares to nearest pools below M.
+Phase 4  Shard assignment (§7): map each pool member to one of the T shards,
+         honoring the chdShardDiversity flag. Runs only after pools are final.
 ```
 
 **Design principle (why the census exists):** never chunk a column in isolation when
 a deficient column is waiting nearby. Committing early produces "Franken-pools" —
-complete but maximally-spanning pools assembled by greedy repair (§10, case 7 shows
+complete but maximally-spanning pools assembled by greedy repair (§11, case 7 shows
 the failure). Deciding merges *before* cutting reaches the global optimum cheaply.
 
 ### 5. Phase 1 — census, virtual chains, flexible-k cut
@@ -668,10 +677,10 @@ Partner selection, in order:
    would produce an unpartitionable unit, do NOT merge — send the deficient column to
    Phase 2 instead. (This keeps `allowDissolve` semantics meaningful: the strict/
    dissolve decision stays with the user rather than being pre-empted by a salvage
-   split. See §10 case 4 vs case 7 for the two behaviors this preserves.)
+   split. See §11 case 4 vs case 7 for the two behaviors this preserves.)
 4. No qualifying partner → the deficient column becomes a Phase 2 fragment whole.
 
-Each column participates in at most one merge (pairwise only — see §9.4 for the
+Each column participates in at most one merge (pairwise only — see §10.4 for the
 known limitation with 3+ deficient columns).
 
 #### 5.3 Seam ordering (linearization)
@@ -696,7 +705,7 @@ column2 = [15], T=5, M=6. Linearization: `15, 1, 2, …, 14`. Cut k=3, sizes 5+5
 ```
 
 Only client 15 crosses the junction, and only to reach the clients immediately on
-the other side. (Contrast with the greedy-repair result in §10 case 7.)
+the other side. (Contrast with the greedy-repair result in §11 case 7.)
 
 #### 5.4 Cutting
 
@@ -730,7 +739,7 @@ Candidates for a fragment F:
 - **surplus** clients of formed pools — a pool has surplus iff `size > T`
   (it can shed while staying complete). **Headroom (`size < M`) is NOT surplus** —
   headroom lets a pool receive, surplus lets it give. Confusing these two is the
-  most likely implementation bug (see §10 cases 4 vs 5).
+  most likely implementation bug (see §11 cases 4 vs 5).
 - To preserve contiguity, only a pool's **edge members** (first/last in its run)
   are sheddable.
 
@@ -757,9 +766,9 @@ requires a re-run to undo. The user opts *into* the lossier action.
 #### 6.3 Defect
 
 A defect is not a resting state — it is a region that cannot survive an RCD outage.
-Always emit it in the report with the feasibility remedy (§7).
+Always emit it in the report with the feasibility remedy (§8).
 
-### 6.4 Phase 4 — shard assignment
+### 7. Phase 4 — shard assignment (runs last)
 
 The data set is split into exactly `T` shards (1..T); each pool member holds one.
 Runs strictly after all pools are final (dissolve included), because diversity is a
@@ -784,9 +793,9 @@ regardless of the flag); defect clients get no shard. Under diversity, a repeat 
 a CHD occurs only when forced (more co-located members than distinct shards
 remaining). `chdShardDiversity = false` currently means *unconstrained*; an active
 clustering mode (same shard grouped per CHD, to prune per-stream multicast trees)
-is a possible third setting — see §9.6.
+is a possible third setting — see §10.5.
 
-### 7. Reporting
+### 8. Reporting
 
 Compute up front and attach to output:
 
@@ -802,9 +811,9 @@ When defects exist, the report should state the remedy in operational terms:
 target making the total partitionable. Example: 19 clients at T=5/M=6 → "1 client
 away from clean (20)". This turns the defect flag from an error into a
 capacity-planning signal. Also emit a per-step trace (merge decisions, donor moves,
-dissolve placements) — invaluable for debugging and for the divergence checks in §10.
+dissolve placements) — invaluable for debugging and for the divergence checks in §11.
 
-### 8. Priority stack (conflict resolution)
+### 9. Priority stack (conflict resolution)
 
 When choices conflict, resolve in this strict order:
 
@@ -815,50 +824,50 @@ When choices conflict, resolve in this strict order:
 Locality is deliberately *last*. It governs partner choice and donor order, but never
 justifies leaving a client below T or shrinking slack that rule 2 created.
 
-### 9. Open decisions (implement the default, flag the fork)
+### 10. Open decisions (implement the default, flag the fork)
 
 These are unresolved in the spec. Implement the stated default; make each one
 cheap to flip; surface them to whoever owns the requirements.
 
-#### 9.1 Mixed client types
+#### 10.1 Mixed client types
 `M` is per client type; a mixed pool's cap is `min` over member types. Default:
 compute it that way. Untested — no real type data yet. Watch for: a merge that
 *lowers* M enough to change feasibility of the merged unit.
 
-#### 9.2 Seam-size trade
+#### 10.2 Seam-size trade
 Current rule gives the seam pool the *larger* size (slack where repair is
 costliest). This increases cross-junction member-pairs vs giving it the smaller
 size (e.g. 10+3 @ T=4: seam of 5 → 6 cross pairs, seam of 4 → 3). If traffic
 should win over slack, reverse the size ordering. Either way: pin with a test.
 
-#### 9.3 Pool immutability
+#### 10.3 Pool immutability
 The donor loop and dissolve both mutate formed pools. If pools must be immutable
 once formed (stability/hysteresis), donors can only come from fragments and
 dissolve must run pre-finalization as a re-chunk. Default: mutation allowed.
 
-#### 9.4 Multi-deficient pairing order
+#### 10.4 Multi-deficient pairing order
 Pairing is greedy (smallest deficient first). With 3+ deficient columns at one
 junction, greedy order can strand clients that a different pairing would save
 (pairing A+B leaves C infeasible while A+C and B+partner recover everyone).
 Default: greedy; production should exhaustively try pairings when deficient
 count at a junction exceeds 2 (the search space is tiny).
 
-#### 9.5 Diversity=false semantics
+#### 10.5 Diversity=false semantics
 `chdShardDiversity = false` is currently *unconstrained* assignment. If the
 motivation for turning diversity off is active same-shard clustering per CHD
 (pruning multicast trees per stream), that is a third mode, not the current false.
 Default: unconstrained; consider an enum {diverse, unconstrained, clustered}.
 
-### 9.6 CLD daisy-chains
+#### 10.6 CLD daisy-chains
 Clients may chain off clients (CLD → CLD). Their `pos` in the proximity metric is
 undefined. Proposed default: a chained client sits at `parent.pos` + chain depth.
 Decide before topologies with client chains go live.
 
-### 10. Verification cases (implement these as tests first)
+### 11. Verification cases (implement these as tests first)
 
 All with M=6. `→` denotes required output. These are the ground-truth cases the
 reference suite asserts; an implementation disagreeing with any of them is wrong
-(except where §9 flags a deliberate fork).
+(except where §10 flags a deliberate fork).
 
 | # | Setup | T | flag | Required outcome |
 |---|-------|---|------|------------------|
@@ -888,12 +897,12 @@ Also assert globally, on every case: coverage (each client in exactly one pool o
 defect), size bounds, shard coverage per pool, and — for feasible totals with
 same-junction columns — zero defects.
 
-### 11. Reference-implementation pointers
+### 12. Reference-implementation pointers
 
 `grouping.py` in this repository implements everything above (~200 lines, stdlib
-only); `test_grouping.py` runs 96 assertions over the cases in §10 plus invariant
+only); `test_grouping.py` runs 96 assertions over the cases in §11 plus invariant
 checks. Use them as an oracle: run both implementations on random topologies and
-diff outputs. Divergences are acceptable only where §9 marks a fork — and then only
+diff outputs. Divergences are acceptable only where §10 marks a fork — and then only
 after the fork is decided and pinned.
 
 ---
@@ -986,6 +995,18 @@ passing in `test_grouping.py` against the reference implementation `grouping.py`
 | J2 | a single lone client, strict | defect [1] | total < T with no pools anywhere |
 | J3 | a single lone client, dissolve | still defect [1] | dissolve needs a pool with headroom to exist |
 | J4 | empty topology | no pools, no defects | vacuous case |
+
+### K. Shard assignment (Phase 4)
+
+| # | Setup | Params | Expected | Exercises |
+|---|-------|--------|----------|-----------|
+| K1/K2 | column with CHDs [1,2,3],[4,5,6],[7,8],[9,10] | T=5, both flags | every pool's shards cover {1..5} | coverage invariant is flag-independent |
+| K3 | column of 6 | T=5 | shard counts [1,1,1,1,2] | duplicates round-robin from shard 1 |
+| K4 | CHDs [1,2,3],[4,5,6] | T=3, diversity=true | each CHD holds 3 distinct shards | per-CHD diversity (pool of 6 duplicates every shard, so this is non-trivial) |
+| K5 | same | T=3, diversity=false | some CHD repeats a shard | unconstrained baseline actually differs from diverse |
+| K6 | column of 10, CHD layout [1–4],[5,6],[7–10] | T=5, diversity=true | clients 5 and 6 (different pools, same CHD) hold different shards | **cross-pool** diversity on a straddling CHD |
+| K7 | flat client list (no CHD info) | T=4, diversity=true | coverage holds; flag is a no-op | flat input degrades gracefully |
+| K8 | lone column of 3 | T=5 | `shards` empty; defect [1,2,3] | defect clients receive no shard |
 
 ### Scenarios covered by design but worth adding when the spec settles
 
